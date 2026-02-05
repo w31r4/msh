@@ -1,226 +1,155 @@
-# msh (Matryoshka-SHell) - Headscale SSH 隧道连接工具 (v4.1 - 智能端口检测版)
+# msh (Matryoshka-SHell)
 
-本项目提供一个名为 `msh` 的命令行工具，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
+通过 SSH 隧道安全连接 Headscale，绕过网络中的 TLS 深度包检测 (DPI)。
 
-与普通脚本不同，本项目注重**易用性**、**健壮性**和**安全性**，内置了完整的交互式配置向导、环境检查和进程管理机制。
+**[Linux/macOS](#快速开始) | [Windows PowerShell](win-powershell/)**
 
-## 核心原理
+## 何时需要 msh？
 
-在某些网络环境中，服务提供商可能会对出站的 TLS 连接进行深度包检测（DPI）或特征审查，这可能导致标准的 Headscale 连接被中断或失败。
+- 网络环境对 TLS 连接进行 DPI 审查，导致 Headscale 连接失败或被重置
+- 需要通过 SSH 隧道安全访问自建 Headscale 服务
 
-为了绕过这种审查，本工具采用了一种 SSH 隧道技术：
+## 工作原理
 
-1.  **建立隧道**：通过 SSH 在本地机器和您的 Headscale 服务器之间建立一个安全的隧道。
-2.  **端口转发**：它将本机的 `443` 端口转发到 Headscale 服务器上的 `localhost:443`。这意味着，当 Tailscale 客户端尝试连接 `https://<你的域名>` 时，由于 `/etc/hosts` 文件的配置，流量实际上被导向到 `127.0.0.1:443`，也就是 SSH 隧道的入口。
-3.  **安全通信**：流量通过 SSH 隧道安全地传输到您的服务器，然后在服务器内部直接访问 Headscale 服务。由于流量被封装在 SSH 协议内，外部网络无法审查其内部的 TLS 握手过程，从而成功规避了连接问题。
-
-整个过程可以简化为：
-`Tailscale 客户端 -> 本地 443 端口 -> SSH 隧道 -> Headscale 服务器 -> Headscale 服务`
-
-## 特性
-
-- **交互式配置**：首次运行时自动引导用户完成所有必要配置，无需手动编辑文件。
-- **智能的环境检查**：启动前自动检查 `tailscale`, `ssh`, `nc`, `lsof` 等核心依赖，并验证 `/etc/hosts` 文件配置。
-- **极其健壮的进程管理**：
-    - **杜绝僵尸进程**：在启动前和结束后，使用 `lsof` 强制查找并清理任何残留的隧道进程，彻底解决了因断网、异常退出导致的端口占用问题。
-    - **精确的 PID 识别**：通过查询 `/proc` 文件系统来识别由 `lsof` 找到的进程，避免了 `ps` 命令在不同系统间的兼容性问题。
-- **可靠的 `sudo` 环境执行**：能够智能地以原始用户身份检查 SSH Agent，确保在 `sudo` 环境下认证过程的正确性。
-- **清晰的错误处理**：在 SSH 密钥认证失败时会立即报错退出，而不是挂起等待密码输入，让问题定位更简单。
-- **优雅的退出机制**：通过 `trap` 捕获中断信号，确保任何情况下都能清理残留进程。
-- **状态检查**：提供 `status` 命令，快速了解隧道和节点的当前状态。
-
-## 安装
-
-1.  **克隆或下载项目**
-    首先，获取项目文件。
-    ```bash
-    git clone https://github.com/your-repo/msh.git
-    cd msh
-    ```
-
-2.  **为脚本添加可执行权限**
-    在运行安装脚本之前，您需要先为其添加可执行权限：
-    ```bash
-    chmod +x install.sh
-    chmod +x msh.sh  # 主脚本也需要可执行权限
-    ```
-
-3.  **运行安装脚本**
-    使用 `sudo` 权限运行安装脚本。该脚本会将 `msh` 命令安装到 `/usr/local/bin`，并设置必要的权限。
-    ```bash
-    sudo ./install.sh
-    ```
-
-## 用法
-
-安装完成后，您可以在任何地方直接使用 `msh` 命令。如果这是您第一次运行，工具会启动一个交互式的设置向导。
-
-### 可用命令
-
-#### 启动隧道并激活节点
-```bash
-msh start [options]
-```
-- **描述**: 这是最常用的命令。它会清理旧进程、获取预授权密钥、建立 SSH 隧道，并激活本地 Tailscale 节点。
-- **选项**:
-  - `--port <端口号>`: 临时指定隧道的本地端口，覆盖配置文件中的 `TUNNEL_PORT`。适用于需要动态端口的场景（例如 WSL2 Mirrored 网络模式）。
-  - `--expiration <时长>`: 指定预授权密钥的有效期，例如 `12h` (12 小时), `30d` (30 天)。默认为 `8h`。
-
-**示例：**
-```bash
-# 使用默认配置启动
-msh start
-
-# 在 WSL 中使用，将隧道建立在 10443 端口，并设置密钥有效期为30天
-msh start --port 10443 --expiration 30d
-```
-
-#### 关闭隧道
-```bash
-msh stop
-```
-- **描述**: 关闭由 `msh` 启动的 SSH 隧道并清理所有相关进程。
-
-#### 检查连接状态
-```bash
-msh status
-```
-- **描述**: 检查 SSH 隧道和 Tailscale 节点的当前状态。
-
-#### 仅激活节点
-```bash
-msh activate [options]
-```
-- **描述**: 此命令仅获取预授权密钥并激活节点，它**不会**创建新的 SSH 隧道。适用于多个客户端（例如 Windows 和 WSL）共享同一个隧道的情况。
-- **选项**:
-  - `--expiration <时长>`: 指定预授权密钥的有效期。
-
-#### 使用已有密钥激活
-```bash
-msh link <预授权密钥> [--port <端口号>]
-```
-- **描述**: 直接使用一个已经存在的预授权密钥来激活节点。此命令非常智能：它会先检查 SSH 隧道是否存在，如果不存在，则会自动为您启动一个。
-- **选项**:
-  - `--port <端口号>`: 在自动启动隧道时，可以临时指定一个端口。
-- **示例**:
-  ```bash
-  msh link hskey-e-a1b2c3d4e5f6...
-  ```
-
-#### 管理配置
-```bash
-msh config <sub-command> [options]
-```
-- **描述**: 提供了一组用于查看和修改本地配置文件的便捷命令，避免了手动编辑的麻烦。
-- **子命令**:
- - `get [KEY]`: 查看全部或单个配置项的值。
-   ```bash
-   # 查看所有配置
-   msh config get
-   # 只看 SSH_USER 的值
-   msh config get SSH_USER
-   ```
- - `set <KEY> <VALUE>`: 修改一个配置项的值。
-   ```bash
-   # 将 SSH 用户改为 'ubuntu'
-   msh config set SSH_USER ubuntu
-   ```
- - `edit`: 使用默认的命令行编辑器 (`$EDITOR`, `vim`, `nano`) 打开配置文件进行手动编辑。
-   ```bash
-   msh config edit
-   ```
-
-### Windows + WSL 协作模式
-
-在 Windows 11 (22H2 或更高版本) 上使用 WSL2 时，推荐启用 **`mirrored` 网络模式**。这允许 WSL 和 Windows 共享网络接口，从而实现更高级的协作。
-
-在这种模式下，正确的做法是：**在 Windows 上建立主隧道，然后在 WSL 中“借用”该隧道来激活节点。**
-
-**工作流程：**
-
-1.  **在 Windows PowerShell 中启动主隧道**:
-    ```powershell
-    # 切换到 win-powershell 目录
-    cd win-powershell
+```mermaid
+flowchart LR
+    subgraph Client[本地客户端]
+        TS[Tailscale]
+        LP[127.0.0.1:443]
+    end
     
-    # 运行 start 命令
-    .\msh.ps1 start
-    ```
-    这会在 Windows 上建立唯一的 SSH 隧道，并激活 Windows 的 Tailscale 节点。
+    subgraph Tunnel[SSH 加密隧道]
+        SSH[SSH 协议封装]
+    end
+    
+    subgraph Server[远程服务器]
+        HS[Headscale 服务]
+    end
+    
+    TS -->|连接域名| LP
+    LP -->|端口转发| SSH
+    SSH -->|安全传输| HS
+    
+    style Tunnel fill:#e3f2fd,stroke:#1976d2
+    style Client fill:#f3e5f5,stroke:#7b1fa2
+    style Server fill:#e8f5e9,stroke:#388e3c
+```
 
-2.  **在 WSL 终端中激活节点**:
-    ```bash
-    # 直接运行 activate 命令，它会自动借用 Windows 的隧道
-    msh activate
-    ```
-    这**不会**创建新隧道，而是通过 Windows 的隧道来激活 WSL 的 Tailscale 节点。
+**核心思路**：通过 `/etc/hosts` 将 Headscale 域名指向本地 `127.0.0.1`，Tailscale 客户端连接本地端口，SSH 隧道将流量转发到远程服务器。TLS 握手封装在 SSH 协议内，无法被 DPI 审查。
 
-完成后，您的 Windows 和 WSL 将作为两个独立的设备出现在 Headscale 网络中，并且都能正常通信。
+## 快速开始
+
+### 前提条件
+
+1. 已配置到 Headscale 服务器的 **SSH 免密登录**
+2. 已安装 `tailscale` 客户端
+3. 已在 `/etc/hosts` 添加：`127.0.0.1 your.headscale.domain`
+
+### 安装
+
+```bash
+git clone https://github.com/w31r4/msh.git
+cd msh && sudo ./install.sh
+```
+
+### 基本用法
+
+```bash
+msh start     # 首次运行会引导配置，之后一键启动隧道并激活节点
+msh status    # 检查隧道和节点状态
+msh stop      # 关闭隧道
+```
+
+## 命令参考
+
+| 命令 | 说明 | 示例 |
+|-----|------|-----|
+| `start` | 启动隧道并激活节点 | `msh start --port 10443 --expiration 30d` |
+| `stop` | 关闭隧道 | `msh stop` |
+| `status` | 检查状态 | `msh status` |
+| `activate` | 仅激活节点，复用已有隧道 | `msh activate --port 10443` |
+| `link <key>` | 使用已有密钥激活，自动启动隧道 | `msh link hskey-xxx` |
+| `config get` | 查看配置 | `msh config get SSH_USER` |
+| `config set` | 修改配置 | `msh config set TUNNEL_PORT 10443` |
+| `config edit` | 编辑配置文件 | `msh config edit` |
+| `help` | 显示帮助 | `msh help` |
+
+### 常用选项
+
+| 选项 | 说明 | 默认值 |
+|-----|------|-------|
+| `--port <端口>` | 指定隧道本地端口 | 443 |
+| `--expiration <时长>` | 预授权密钥有效期 | 8h |
+
+## WSL + Windows 协作
+
+在 Windows 11 WSL2 `mirrored` 网络模式下，Windows 和 WSL 共享网络接口。推荐在 Windows 建立隧道，WSL 借用：
+
+```mermaid
+flowchart TB
+    subgraph Windows[Windows 主机]
+        WinTS[Tailscale Windows]
+        WinSSH[SSH 隧道 - 端口 10443]
+    end
+    
+    subgraph WSL[WSL2 环境]
+        WslTS[Tailscale WSL]
+    end
+    
+    subgraph Remote[远程服务器]
+        HS[Headscale]
+    end
+    
+    WinSSH -->|SSH 加密| Remote
+    WinTS -->|使用隧道| WinSSH
+    WslTS -->|借用隧道| WinSSH
+    
+    style Windows fill:#e3f2fd,stroke:#1976d2
+    style WSL fill:#fff3e0,stroke:#f57c00
+    style Remote fill:#e8f5e9,stroke:#388e3c
+```
+
+```powershell
+# Windows 端启动隧道
+.\win-powershell\msh.ps1 start
+```
+
+```bash
+# WSL 端借用隧道激活
+msh activate
+```
+
+详见 [Windows PowerShell 版本文档](win-powershell/)。
+
+## 配置文件
+
+首次运行会自动引导配置，配置保存在 `~/.config/msh/config.sh`：
+
+| 配置项 | 说明 |
+|-------|------|
+| `SERVER_IP` | Headscale 服务器 IP |
+| `HEADSCALE_DOMAIN` | Headscale 域名 |
+| `SSH_USER` | SSH 登录用户名 |
+| `SSH_KEY_PATH` | SSH 私钥路径 |
+| `USER` | Headscale 用户名 |
+| `TUNNEL_PORT` | 隧道本地端口 |
+
+## 故障排查
+
+| 问题 | 解决方案 |
+|-----|---------|
+| `/etc/hosts` 缺少条目 | 添加 `127.0.0.1 your.headscale.domain` |
+| SSH 密钥认证失败 | 运行 `ssh-add ~/.ssh/id_rsa` 加载密钥 |
+| 端口 443 被占用 | 使用 `msh start --port 10443` |
+| 未检测到 SSH 隧道 (WSL) | Windows 端先运行 `.\msh.ps1 start` |
+| 预授权密钥获取失败 | 检查服务器 Headscale 服务状态和 SSH 配置 |
 
 ## 卸载
 
-如果您希望从系统中移除本工具，请在项目目录中运行卸载脚本：
 ```bash
 sudo ./uninstall.sh
 ```
 
-## 前提条件
+## License
 
-在运行工具前，请确保您已完成以下配置。工具会自动检查这些条件，并在不满足时给出提示。
-
-1.  **修改 Hosts 文件**：
-    在您的 **本地客户端机器** 上，编辑 `/etc/hosts` 文件 (需要 `sudo` 权限)，添加以下行：
-    ```
-    127.0.0.1 your.headscale.domain.com
-    ```
-    *(工具会自动检查该配置是否存在)*
-    **注意**: 如果您使用自定义端口（例如在 WSL 中），此步骤依然是必需的，因为 Tailscale 客户端需要通过域名来验证 TLS 证书。
-
-2.  **配置 `TUNNEL_PORT` (推荐)**:
-    在首次运行时，配置向导会提示您输入 `TUNNEL_PORT`，默认为 `443`。**v4.1 建议**:
-    - 标准 Linux 环境：使用默认的 443 端口
-    - WSL2 的 `mirrored` 网络模式：建议设置为 `10443`，避免权限和冲突问题
-
-2.  **配置 SSH 免密登录**：
-    确保您可以从本地机器通过 SSH 密钥免密码登录到您的 Headscale 服务器。
-
-3.  **SSH Agent 配置**：
-    工具会检查您的 SSH Agent 中是否已加载私钥。在运行前，请确保执行了以下命令来加载密钥：
-    ```bash
-    eval $(ssh-agent -s)
-    ssh-add /path/to/your/private_key
-    ```
-
-## 故障排查
-
-- **错误：/etc/hosts 文件缺少必要的条目。**
-  -> 请按照“前提条件”中的说明，编辑 `/etc/hosts` 文件。
-
-- **错误：缺少核心依赖 'xxx'。**
-  -> 请根据提示安装缺失的命令行工具。例如，在 Debian/Ubuntu 上：`sudo apt-get install openssh-client netcat-openbsd`。
-
-- **错误：未能从服务器获取有效的预授权密钥 (或 Permission denied)。**
-  -> 这个错误通常意味着 SSH 密钥认证失败。请检查：
-    1.  您的 SSH 免密登录是否配置正确且仍然有效。可以通过 `ssh -i <您的密钥路径> <用户名>@<服务器IP>` 手动测试。
-    2.  确保运行脚本前，您的 SSH 密钥已通过 `ssh-add` 添加到 SSH Agent 中。
-    3.  您在交互式配置中输入的服务器 IP、SSH 用户名和 Headscale 用户名是否正确。
-    4.  服务器上的 Headscale 服务是否正在正常运行。
-
-- **错误：SSH 隧道在 10 秒内未能成功监听端口 443。**
-  -> 请检查：
-    1.  本地的 `443` 端口是否已被其他程序占用 (`sudo lsof -i:443`)。
-    2.  服务器的防火墙是否允许 SSH 连接。
-    3.  **v4.1 新增**: 尝试使用其他端口，如 `msh start --port 10443`
-
-- **错误：无法连接到 Windows 上的 SSH 隧道**
-  -> **v4.1 解决方案**：
-    1.  在 Windows 上检查隧道状态：`.\msh.ps1 status`
-    2.  在 WSL 中手动指定端口：`msh activate --port 10443`
-    3.  检查端口连通性：`nc -z 127.0.0.1 10443`
-    4.  查看 SSH 监听端口：`sudo lsof -i -P -n | grep LISTEN | grep ssh`
-
-- **错误：未检测到活动的 SSH 隧道**
-  -> **v4.1 智能检测**:
-    1.  确保 Windows 隧道已启动：`.\msh.ps1 start`
-    2.  使用手动端口指定：`msh activate --port 10443`
-    3.  检查防火墙设置，确保允许本地连接
+MIT
